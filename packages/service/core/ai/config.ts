@@ -13,6 +13,9 @@ export const getAIApi = (props?: {
     userKey?.baseUrl || global?.systemEnv?.oneapiUrl || process.env.ONEAPI_URL || openaiBaseUrl;
   const apiKey = userKey?.key || global?.systemEnv?.chatApiKey || process.env.CHAT_API_KEY || '';
 
+  console.log('baseUrl: ', baseUrl);
+  console.log('apiKey: ', apiKey);
+
   return new OpenAI({
     baseURL: baseUrl,
     apiKey,
