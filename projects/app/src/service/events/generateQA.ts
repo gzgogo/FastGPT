@@ -1,7 +1,7 @@
 import { MongoDatasetTraining } from '@fastgpt/service/core/dataset/training/schema';
 import { pushQAUsage } from '@/service/support/wallet/usage/push';
 import { TrainingModeEnum } from '@fastgpt/global/core/dataset/constants';
-import { getAIApi } from '@fastgpt/service/core/ai/config';
+import { createChatCompletion } from '@fastgpt/service/core/ai/config';
 import type { ChatCompletionMessageParam } from '@fastgpt/global/core/ai/type.d';
 import { addLog } from '@fastgpt/service/common/system/log';
 import { splitText2Chunks } from '@fastgpt/global/common/string/textSplitter';
@@ -12,8 +12,10 @@ import { getLLMModel } from '@fastgpt/service/core/ai/model';
 import { checkTeamAiPointsAndLock } from './utils';
 import { checkInvalidChunkAndLock } from '@fastgpt/service/core/dataset/training/utils';
 import { addMinutes } from 'date-fns';
-import { countGptMessagesTokens } from '@fastgpt/global/common/string/tiktoken';
-import { pushDataListToTrainingQueue } from '@fastgpt/service/core/dataset/training/controller';
+import { countGptMessagesTokens } from '@fastgpt/service/common/string/tiktoken/index';
+import { pushDataListToTrainingQueueByCollectionId } from '@fastgpt/service/core/dataset/training/controller';
+import { loadRequestMessages } from '@fastgpt/service/core/chat/utils';
+import { llmCompletionsBodyFormat } from '@fastgpt/service/core/ai/utils';
 
 const reduceQueue = () => {
   global.qaQueueLen = global.qaQueueLen > 0 ? global.qaQueueLen - 1 : 0;
@@ -37,16 +39,17 @@ export async function generateQA(): Promise<any> {
     try {
       const data = await MongoDatasetTraining.findOneAndUpdate(
         {
-          lockTime: { $lte: addMinutes(new Date(), -6) },
-          mode: TrainingModeEnum.qa
+          mode: TrainingModeEnum.qa,
+          retryCount: { $gte: 0 },
+          lockTime: { $lte: addMinutes(new Date(), -6) }
         },
         {
-          lockTime: new Date()
+          lockTime: new Date(),
+          $inc: { retryCount: -1 }
         }
       )
         .select({
           _id: 1,
-          userId: 1,
           teamId: 1,
           tmbId: 1,
           datasetId: 1,
@@ -89,14 +92,14 @@ export async function generateQA(): Promise<any> {
   }
 
   // auth balance
-  if (!(await checkTeamAiPointsAndLock(data.teamId, data.tmbId))) {
+  if (!(await checkTeamAiPointsAndLock(data.teamId))) {
     reduceQueue();
     return generateQA();
   }
   addLog.info(`[QA Queue] Start`);
 
   try {
-    const model = getLLMModel(data.model)?.model;
+    const modelData = getLLMModel(data.model);
     const prompt = `${data.prompt || Prompt_AgentQA.description}
 ${replaceVariable(Prompt_AgentQA.fixedText, { text })}`;
 
@@ -108,14 +111,16 @@ ${replaceVariable(Prompt_AgentQA.fixedText, { text })}`;
       }
     ];
 
-    const ai = getAIApi({
-      timeout: 600000
-    });
-    const chatResponse = await ai.chat.completions.create({
-      model,
-      temperature: 0.3,
-      messages,
-      stream: false
+    const { response: chatResponse } = await createChatCompletion({
+      body: llmCompletionsBodyFormat(
+        {
+          model: modelData.model,
+          temperature: 0.3,
+          messages: await loadRequestMessages({ messages, useVision: false }),
+          stream: false
+        },
+        modelData
+      )
     });
     const answer = chatResponse.choices?.[0].message?.content || '';
 
@@ -128,7 +133,7 @@ ${replaceVariable(Prompt_AgentQA.fixedText, { text })}`;
     });
 
     // get vector and insert
-    const { insertLen } = await pushDataListToTrainingQueue({
+    const { insertLen } = await pushDataListToTrainingQueueByCollectionId({
       teamId: data.teamId,
       tmbId: data.tmbId,
       collectionId: data.collectionId,
@@ -148,9 +153,9 @@ ${replaceVariable(Prompt_AgentQA.fixedText, { text })}`;
       pushQAUsage({
         teamId: data.teamId,
         tmbId: data.tmbId,
-        tokens: countGptMessagesTokens(messages),
+        tokens: await countGptMessagesTokens(messages),
         billId: data.billId,
-        model
+        model: modelData.model
       });
     } else {
       addLog.info(`QA result 0:`, { answer });
@@ -159,6 +164,7 @@ ${replaceVariable(Prompt_AgentQA.fixedText, { text })}`;
     reduceQueue();
     generateQA();
   } catch (err: any) {
+    addLog.error(`[QA Queue] Error`);
     reduceQueue();
 
     if (await checkInvalidChunkAndLock({ err, data, errText: 'QA模型调用失败' })) {

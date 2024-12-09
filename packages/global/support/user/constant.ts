@@ -14,5 +14,7 @@ export const userStatusMap = {
 export enum OAuthEnum {
   github = 'github',
   google = 'google',
-  wechat = 'wechat'
+  wechat = 'wechat',
+  microsoft = 'microsoft',
+  sso = 'sso'
 }

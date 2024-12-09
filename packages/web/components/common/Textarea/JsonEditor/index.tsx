@@ -4,9 +4,10 @@ import { Box, BoxProps } from '@chakra-ui/react';
 import MyIcon from '../../Icon';
 import { useToast } from '../../../../hooks/useToast';
 import { useTranslation } from 'next-i18next';
+import { getWebReqUrl } from '../../../../common/system/utils';
 
 loader.config({
-  paths: { vs: '/js/monaco-editor.0.45.0/vs' }
+  paths: { vs: getWebReqUrl('/js/monaco-editor.0.45.0/vs') }
 });
 
 type EditorVariablePickerType = {
@@ -22,6 +23,9 @@ type Props = Omit<BoxProps, 'resize' | 'onChange'> & {
   onChange?: (e: string) => void;
   variables?: EditorVariablePickerType[];
   defaultHeight?: number;
+  placeholder?: string;
+  isDisabled?: boolean;
+  isInvalid?: boolean;
 };
 
 const options = {
@@ -54,6 +58,8 @@ const JSONEditor = ({
   variables = [],
   placeholder,
   defaultHeight = 100,
+  isDisabled = false,
+  isInvalid = false,
   ...props
 }: Props) => {
   const { toast } = useToast();
@@ -75,7 +81,6 @@ const JSONEditor = ({
         const lineContent = model.getLineContent(position.lineNumber);
 
         if (context.triggerCharacter) {
-          console.log(context.triggerCharacter);
           triggerChar.current = context.triggerCharacter;
         }
         const word = model.getWordUntilPosition(position);
@@ -173,7 +178,7 @@ const JSONEditor = ({
     } catch (error) {
       toast({
         status: 'warning',
-        title: t('common.jsonEditor.Parse error')
+        title: t('common:common.jsonEditor.Parse error')
       });
     }
   }, [value]);
@@ -208,9 +213,9 @@ const JSONEditor = ({
 
   return (
     <Box
-      borderWidth={'1px'}
+      borderWidth={isInvalid ? '2px' : '1px'}
       borderRadius={'md'}
-      borderColor={'myGray.200'}
+      borderColor={isInvalid ? 'red.500' : 'myGray.200'}
       py={2}
       height={height}
       position={'relative'}
@@ -219,8 +224,8 @@ const JSONEditor = ({
       {resize && (
         <Box
           position={'absolute'}
-          right={'0'}
-          bottom={'0'}
+          right={'-2'}
+          bottom={'-3'}
           zIndex={10}
           cursor={'ns-resize'}
           px={'4px'}
@@ -264,6 +269,8 @@ const JSONEditor = ({
         fontSize={'xs'}
         color={'myGray.500'}
         display={placeholderDisplay}
+        pointerEvents={'none'}
+        userSelect={'none'}
       >
         {placeholder}
       </Box>

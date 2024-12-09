@@ -2,86 +2,99 @@ import React, { useMemo } from 'react';
 import { Box, BoxProps, Flex, Link, LinkProps } from '@chakra-ui/react';
 import { useRouter } from 'next/router';
 import { useUserStore } from '@/web/support/user/useUserStore';
-import { useChatStore } from '@/web/core/chat/storeChat';
+import { useChatStore } from '@/web/core/chat/context/useChatStore';
 import { HUMAN_ICON } from '@fastgpt/global/common/system/constants';
 import NextLink from 'next/link';
 import Badge from '../Badge';
-import Avatar from '../Avatar';
+import Avatar from '@fastgpt/web/components/common/Avatar';
 import MyIcon from '@fastgpt/web/components/common/Icon';
 import { useTranslation } from 'next-i18next';
 import { useSystemStore } from '@/web/common/system/useSystemStore';
-import MyTooltip from '../MyTooltip';
-import { getDocPath } from '@/web/common/system/doc';
+import MyTooltip from '@fastgpt/web/components/common/MyTooltip';
 
 export enum NavbarTypeEnum {
   normal = 'normal',
   small = 'small'
 }
 
+const itemStyles: BoxProps & LinkProps = {
+  my: 2,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  cursor: 'pointer',
+  w: '48px',
+  h: '58px',
+  borderRadius: 'md'
+};
+const hoverStyle: LinkProps = {
+  _hover: {
+    bg: 'myGray.05',
+    color: 'primary.600'
+  }
+};
+
 const Navbar = ({ unread }: { unread: number }) => {
   const { t } = useTranslation();
   const router = useRouter();
   const { userInfo } = useUserStore();
   const { gitStar, feConfigs } = useSystemStore();
-  const { lastChatAppId, lastChatId } = useChatStore();
+  const { lastChatAppId } = useChatStore();
+
   const navbarList = useMemo(
     () => [
       {
-        label: t('navbar.Chat'),
+        label: t('common:navbar.Chat'),
         icon: 'core/chat/chatLight',
         activeIcon: 'core/chat/chatFill',
-        link: `/chat?appId=${lastChatAppId}&chatId=${lastChatId}`,
+        link: `/chat?appId=${lastChatAppId}`,
         activeLink: ['/chat']
       },
       {
-        label: t('navbar.Apps'),
+        label: t('common:navbar.Studio'),
         icon: 'core/app/aiLight',
         activeIcon: 'core/app/aiFill',
         link: `/app/list`,
         activeLink: ['/app/list', '/app/detail']
       },
       {
-        label: t('navbar.Plugin'),
-        icon: 'common/navbar/pluginLight',
-        activeIcon: 'common/navbar/pluginFill',
-        link: `/plugin/list`,
-        activeLink: ['/plugin/list', '/plugin/edit']
-      },
-      {
-        label: t('navbar.Datasets'),
+        label: t('common:navbar.Datasets'),
         icon: 'core/dataset/datasetLight',
         activeIcon: 'core/dataset/datasetFill',
         link: `/dataset/list`,
         activeLink: ['/dataset/list', '/dataset/detail']
       },
       {
-        label: t('navbar.Account'),
+        label: t('common:navbar.Toolkit'),
+        icon: 'phoneTabbar/tool',
+        activeIcon: 'phoneTabbar/toolFill',
+        link: `/toolkit`,
+        activeLink: ['/toolkit']
+      },
+      {
+        label: t('common:navbar.Account'),
         icon: 'support/user/userLight',
         activeIcon: 'support/user/userFill',
-        link: '/account',
-        activeLink: ['/account']
+        link: '/account/info',
+        activeLink: [
+          '/account/bill',
+          '/account/info',
+          '/account/team',
+          '/account/usage',
+          '/account/apikey',
+          '/account/individuation',
+          '/account/inform',
+          '/account/promotion'
+        ]
       }
     ],
-    [lastChatAppId, lastChatId, t]
+    [lastChatAppId, t]
   );
 
-  const itemStyles: BoxProps & LinkProps = {
-    my: 3,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer',
-    w: '48px',
-    h: '58px',
-    borderRadius: 'md'
-  };
-  const hoverStyle: LinkProps = {
-    _hover: {
-      bg: 'myGray.05',
-      color: 'primary.600'
-    }
-  };
+  const isSecondNavbarPage = useMemo(() => {
+    return ['/toolkit'].includes(router.pathname);
+  }, [router.pathname]);
 
   return (
     <Flex
@@ -91,18 +104,20 @@ const Navbar = ({ unread }: { unread: number }) => {
       h={'100%'}
       w={'100%'}
       userSelect={'none'}
+      pb={2}
+      bg={isSecondNavbarPage ? 'myGray.50' : 'transparent'}
     >
       {/* logo */}
       <Box
         flex={'0 0 auto'}
-        mb={5}
+        mb={3}
         border={'2px solid #fff'}
         borderRadius={'50%'}
         overflow={'hidden'}
         cursor={'pointer'}
         onClick={() => router.push('/account')}
       >
-        <Avatar w={'36px'} h={'36px'} src={userInfo?.avatar} fallbackSrc={HUMAN_ICON} />
+        <Avatar w={'2rem'} h={'2rem'} src={userInfo?.avatar} borderRadius={'50%'} />
       </Box>
       {/* 导航列表 */}
       <Box flex={1}>
@@ -121,7 +136,7 @@ const Navbar = ({ unread }: { unread: number }) => {
                   color: 'myGray.500',
                   bg: 'transparent',
                   _hover: {
-                    bg: 'rgba(255,255,255,0.9)'
+                    bg: isSecondNavbarPage ? 'white' : 'rgba(255,255,255,0.9)'
                   }
                 })}
             {...(item.link !== router.asPath
@@ -153,9 +168,10 @@ const Navbar = ({ unread }: { unread: number }) => {
             {...itemStyles}
             {...hoverStyle}
             prefetch
-            href={`/account?currentTab=inform`}
+            href={`/account/inform`}
             mb={0}
             color={'myGray.500'}
+            height={'48px'}
           >
             <Badge count={unread}>
               <MyIcon name={'support/user/informLight'} width={'22px'} height={'22px'} />
@@ -163,20 +179,26 @@ const Navbar = ({ unread }: { unread: number }) => {
           </Link>
         </Box>
       )}
-      {(feConfigs?.docUrl || feConfigs?.chatbotUrl) && (
-        <MyTooltip label={t('common.system.Use Helper')} placement={'right-end'}>
-          <Link
-            {...itemStyles}
-            {...hoverStyle}
-            href={feConfigs?.chatbotUrl || getDocPath('/docs/intro')}
-            target="_blank"
-            mb={0}
-            color={'myGray.500'}
-          >
-            <MyIcon name={'common/courseLight'} width={'24px'} height={'24px'} />
-          </Link>
-        </MyTooltip>
-      )}
+
+      {feConfigs?.navbarItems
+        ?.filter((item) => item.isActive)
+        .map((item) => (
+          <MyTooltip key={item.id} label={item.name} placement={'right-end'}>
+            <Link
+              as={NextLink}
+              href={item.url}
+              target={'_blank'}
+              {...itemStyles}
+              {...hoverStyle}
+              mt={0}
+              color={'myGray.500'}
+              height={'48px'}
+            >
+              <Avatar src={item.avatar} borderRadius={'md'} />
+            </Link>
+          </MyTooltip>
+        ))}
+
       {feConfigs?.show_git && (
         <MyTooltip label={`Git Star: ${gitStar}`} placement={'right-end'}>
           <Link
@@ -187,6 +209,7 @@ const Navbar = ({ unread }: { unread: number }) => {
             {...hoverStyle}
             mt={0}
             color={'myGray.500'}
+            height={'48px'}
           >
             <MyIcon name={'common/gitInlight'} width={'26px'} height={'26px'} />
           </Link>

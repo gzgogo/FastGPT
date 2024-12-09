@@ -1,14 +1,16 @@
-import { delay } from '@fastgpt/global/common/system/utils';
 import { MongoDatasetTraining } from './schema';
 import type {
   PushDatasetDataChunkProps,
   PushDatasetDataProps,
   PushDatasetDataResponse
 } from '@fastgpt/global/core/dataset/api.d';
-import { getCollectionWithDataset } from '../controller';
 import { TrainingModeEnum } from '@fastgpt/global/core/dataset/constants';
 import { simpleText } from '@fastgpt/global/common/string/tools';
-import { countPromptTokens } from '@fastgpt/global/common/string/tiktoken';
+import { ClientSession } from '../../../common/mongo';
+import { getLLMModel, getVectorModel } from '../../ai/model';
+import { addLog } from '../../../common/system/log';
+import { getCollectionWithDataset } from '../controller';
+import { mongoSessionRun } from '../../../common/mongo/sessionRun';
 
 export const lockTrainingDataByTeamId = async (teamId: string): Promise<any> => {
   try {
@@ -23,38 +25,59 @@ export const lockTrainingDataByTeamId = async (teamId: string): Promise<any> => 
   } catch (error) {}
 };
 
-export async function pushDataListToTrainingQueue({
-  teamId,
-  tmbId,
+export const pushDataListToTrainingQueueByCollectionId = async ({
   collectionId,
-  data,
-  prompt,
-  billId,
-  trainingMode = TrainingModeEnum.chunk
+  ...props
 }: {
   teamId: string;
   tmbId: string;
-} & PushDatasetDataProps): Promise<PushDatasetDataResponse> {
-  const vectorModelList = global.vectorModels;
-  const datasetModelList = global.llmModels;
-
+  session?: ClientSession;
+} & PushDatasetDataProps) => {
   const {
-    datasetId: { _id: datasetId, vectorModel, agentModel }
+    datasetId: { _id: datasetId, agentModel, vectorModel }
   } = await getCollectionWithDataset(collectionId);
+  return pushDataListToTrainingQueue({
+    ...props,
+    datasetId,
+    collectionId,
+    agentModel,
+    vectorModel
+  });
+};
 
-  const checkModelValid = async () => {
-    const agentModelData = datasetModelList?.find((item) => item.model === agentModel);
+export async function pushDataListToTrainingQueue({
+  teamId,
+  tmbId,
+  datasetId,
+  collectionId,
+  agentModel,
+  vectorModel,
+  data,
+  prompt,
+  billId,
+  trainingMode = TrainingModeEnum.chunk,
+  session
+}: {
+  teamId: string;
+  tmbId: string;
+  datasetId: string;
+  agentModel: string;
+  vectorModel: string;
+  session?: ClientSession;
+} & PushDatasetDataProps): Promise<PushDatasetDataResponse> {
+  const { model, maxToken, weight } = await (async () => {
+    const agentModelData = getLLMModel(agentModel);
     if (!agentModelData) {
       return Promise.reject(`File model ${agentModel} is inValid`);
     }
-    const vectorModelData = vectorModelList?.find((item) => item.model === vectorModel);
+    const vectorModelData = getVectorModel(vectorModel);
     if (!vectorModelData) {
       return Promise.reject(`Vector model ${vectorModel} is inValid`);
     }
 
     if (trainingMode === TrainingModeEnum.chunk) {
       return {
-        maxToken: vectorModelData.maxToken * 1.3,
+        maxToken: vectorModelData.maxToken * 1.5,
         model: vectorModelData.model,
         weight: vectorModelData.weight
       };
@@ -69,9 +92,16 @@ export async function pushDataListToTrainingQueue({
     }
 
     return Promise.reject(`Training mode "${trainingMode}" is inValid`);
-  };
+  })();
 
-  const { model, maxToken, weight } = await checkModelValid();
+  // filter repeat or equal content
+  const set = new Set();
+  const filterResult: Record<string, PushDatasetDataChunkProps[]> = {
+    success: [],
+    overToken: [],
+    repeat: [],
+    error: []
+  };
 
   // format q and a, remove empty char
   data.forEach((item) => {
@@ -86,19 +116,8 @@ export async function pushDataListToTrainingQueue({
         };
       })
       .filter(Boolean);
-  });
 
-  // filter repeat or equal content
-  const set = new Set();
-  const filterResult: Record<string, PushDatasetDataChunkProps[]> = {
-    success: [],
-    overToken: [],
-    repeat: [],
-    error: []
-  };
-
-  // filter repeat content
-  data.forEach((item) => {
+    // filter repeat content
     if (!item.q) {
       filterResult.error.push(item);
       return;
@@ -106,10 +125,7 @@ export async function pushDataListToTrainingQueue({
 
     const text = item.q + item.a;
 
-    // count q token
-    const token = countPromptTokens(item.q);
-
-    if (token > maxToken) {
+    if (text.length > maxToken) {
       filterResult.overToken.push(item);
       return;
     }
@@ -124,10 +140,19 @@ export async function pushDataListToTrainingQueue({
   });
 
   // insert data to db
-  const insertData = async (dataList: PushDatasetDataChunkProps[], retry = 3): Promise<number> => {
+  const insertLen = filterResult.success.length;
+  const failedDocuments: PushDatasetDataChunkProps[] = [];
+
+  // 使用 insertMany 批量插入
+  const batchSize = 200;
+  const insertData = async (startIndex: number, session: ClientSession) => {
+    const list = filterResult.success.slice(startIndex, startIndex + batchSize);
+
+    if (list.length === 0) return;
+
     try {
-      const results = await MongoDatasetTraining.insertMany(
-        dataList.map((item, i) => ({
+      await MongoDatasetTraining.insertMany(
+        list.map((item) => ({
           teamId,
           tmbId,
           datasetId,
@@ -141,35 +166,33 @@ export async function pushDataListToTrainingQueue({
           chunkIndex: item.chunkIndex ?? 0,
           weight: weight ?? 0,
           indexes: item.indexes
-        }))
+        })),
+        {
+          session,
+          ordered: true
+        }
       );
-      await delay(500);
-      return results.length;
-    } catch (error) {
-      if (retry > 0) {
-        await delay(500);
-        return insertData(dataList, retry - 1);
-      }
-      return Promise.reject(error);
+    } catch (error: any) {
+      addLog.error(`Insert error`, error);
+      // 如果有错误，将失败的文档添加到失败列表中
+      error.writeErrors?.forEach((writeError: any) => {
+        failedDocuments.push(data[writeError.index]);
+      });
+      console.log('failed', failedDocuments);
     }
+
+    // 对于失败的文档，尝试单独插入
+    await MongoDatasetTraining.create(failedDocuments, { session });
+
+    return insertData(startIndex + batchSize, session);
   };
 
-  let insertLen = 0;
-  const chunkSize = 50;
-  const chunkList = filterResult.success.reduce(
-    (acc, cur) => {
-      const lastChunk = acc[acc.length - 1];
-      if (lastChunk.length < chunkSize) {
-        lastChunk.push(cur);
-      } else {
-        acc.push([cur]);
-      }
-      return acc;
-    },
-    [[]] as PushDatasetDataChunkProps[][]
-  );
-  for await (const chunks of chunkList) {
-    insertLen += await insertData(chunks);
+  if (session) {
+    await insertData(0, session);
+  } else {
+    await mongoSessionRun(async (session) => {
+      await insertData(0, session);
+    });
   }
 
   delete filterResult.success;

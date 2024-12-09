@@ -1,110 +1,56 @@
-/* 
-    Create one dataset collection
-*/
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
+import type { NextApiRequest } from 'next';
 import type { TextCreateDatasetCollectionParams } from '@fastgpt/global/core/dataset/api.d';
-import { authDataset } from '@fastgpt/service/support/permission/auth/dataset';
-import { createOneCollection } from '@fastgpt/service/core/dataset/collection/controller';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
+import { createCollectionAndInsertData } from '@fastgpt/service/core/dataset/collection/controller';
 import {
   TrainingModeEnum,
   DatasetCollectionTypeEnum
 } from '@fastgpt/global/core/dataset/constants';
-import { splitText2Chunks } from '@fastgpt/global/common/string/textSplitter';
-import { checkDatasetLimit } from '@fastgpt/service/support/permission/teamLimit';
-import { predictDataLimitLength } from '@fastgpt/global/core/dataset/utils';
-import { pushDataListToTrainingQueue } from '@fastgpt/service/core/dataset/training/controller';
 import { hashStr } from '@fastgpt/global/common/string/tools';
-import { createTrainingUsage } from '@fastgpt/service/support/wallet/usage/controller';
-import { UsageSourceEnum } from '@fastgpt/global/support/wallet/usage/constants';
-import { getLLMModel, getVectorModel } from '@fastgpt/service/core/ai/model';
+import { NextAPI } from '@/service/middleware/entry';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { CreateCollectionResponse } from '@/global/core/dataset/api';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const {
-      name,
-      text,
-      trainingType = TrainingModeEnum.chunk,
-      chunkSize = 512,
-      chunkSplitter,
-      qaPrompt,
-      ...body
-    } = req.body as TextCreateDatasetCollectionParams;
+async function handler(req: NextApiRequest): CreateCollectionResponse {
+  const {
+    name,
+    text,
+    trainingType = TrainingModeEnum.chunk,
+    chunkSize = 512,
+    chunkSplitter,
+    qaPrompt,
+    ...body
+  } = req.body as TextCreateDatasetCollectionParams;
 
-    const { teamId, tmbId, dataset } = await authDataset({
-      req,
-      authToken: true,
-      authApiKey: true,
-      datasetId: body.datasetId,
-      per: 'w'
-    });
+  const { teamId, tmbId, dataset } = await authDataset({
+    req,
+    authToken: true,
+    authApiKey: true,
+    datasetId: body.datasetId,
+    per: WritePermissionVal
+  });
 
-    // 1. split text to chunks
-    const { chunks } = splitText2Chunks({
-      text,
-      chunkLen: chunkSize,
-      overlapRatio: trainingType === TrainingModeEnum.chunk ? 0.2 : 0,
-      customReg: chunkSplitter ? [chunkSplitter] : []
-    });
-
-    // 2. check dataset limit
-    await checkDatasetLimit({
-      teamId,
-      insertLen: predictDataLimitLength(trainingType, chunks)
-    });
-
-    // 3. create collection and training bill
-    const [{ _id: collectionId }, { billId }] = await Promise.all([
-      createOneCollection({
-        ...body,
-        teamId,
-        tmbId,
-        type: DatasetCollectionTypeEnum.virtual,
-
-        name,
-        trainingType,
-        chunkSize,
-        chunkSplitter,
-        qaPrompt,
-
-        hashRawText: hashStr(text),
-        rawTextLength: text.length
-      }),
-      createTrainingUsage({
-        teamId,
-        tmbId,
-        appName: name,
-        billSource: UsageSourceEnum.training,
-        vectorModel: getVectorModel(dataset.vectorModel)?.name,
-        agentModel: getLLMModel(dataset.agentModel)?.name
-      })
-    ]);
-
-    // 4. push chunks to training queue
-    const insertResults = await pushDataListToTrainingQueue({
+  const { collectionId, insertResults } = await createCollectionAndInsertData({
+    dataset,
+    rawText: text,
+    createCollectionParams: {
+      ...body,
       teamId,
       tmbId,
-      collectionId,
-      trainingMode: trainingType,
-      prompt: qaPrompt,
-      billId,
-      data: chunks.map((text, index) => ({
-        q: text,
-        chunkIndex: index
-      }))
-    });
+      type: DatasetCollectionTypeEnum.virtual,
 
-    jsonRes(res, {
-      data: { collectionId, results: insertResults }
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+      name,
+      trainingType,
+      chunkSize,
+      chunkSplitter,
+      qaPrompt
+    }
+  });
+
+  return {
+    collectionId,
+    results: insertResults
+  };
 }
 
 export const config = {
@@ -114,3 +60,5 @@ export const config = {
     }
   }
 };
+
+export default NextAPI(handler);

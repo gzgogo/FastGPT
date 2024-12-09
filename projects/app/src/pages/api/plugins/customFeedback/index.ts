@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+//@ts-ignore
 import type { HttpBodyType } from '@fastgpt/global/core/module/api.d';
 import { getErrText } from '@fastgpt/global/common/error/utils';
 import { addCustomFeedbacks } from '@fastgpt/service/core/chat/controller';
@@ -17,7 +18,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     const {
       appId,
       chatId,
-      responseChatItemId: chatItemId,
+      responseChatItemId: dataId,
       defaultFeedback,
       customFeedback
     } = req.body as Props;
@@ -37,12 +38,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
       addCustomFeedbacks({
         appId,
         chatId,
-        chatItemId,
+        dataId,
         feedbacks: [feedback]
       });
     }, 60000);
 
-    if (!chatId || !chatItemId) {
+    if (!chatId || !dataId) {
       return res.json({
         response: `\\n\\n**自动反馈调试**: ${feedback}\\n\\n`
       });

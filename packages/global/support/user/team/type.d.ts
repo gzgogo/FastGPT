@@ -1,5 +1,8 @@
 import type { UserModelSchema } from '../type';
 import type { TeamMemberRoleEnum, TeamMemberStatusEnum } from './constant';
+import { LafAccountType } from './type';
+import { PermissionValueType, ResourcePermissionType } from '../../permission/type';
+import { TeamPermission } from '../../permission/user/controller';
 
 export type TeamSchema = {
   _id: string;
@@ -13,11 +16,15 @@ export type TeamSchema = {
     lastExportDatasetTime: Date;
     lastWebsiteSyncTime: Date;
   };
+  lafAccount: LafAccountType;
+  notificationAccount?: string;
 };
+
 export type tagsType = {
   label: string;
   key: string;
 };
+
 export type TeamTagSchema = TeamTagItemType & {
   _id: string;
   teamId: string;
@@ -38,14 +45,16 @@ export type TeamMemberSchema = {
 export type TeamMemberWithUserSchema = Omit<TeamMemberSchema, 'userId'> & {
   userId: UserModelSchema;
 };
+
 export type TeamMemberWithTeamSchema = Omit<TeamMemberSchema, 'teamId'> & {
   teamId: TeamSchema;
 };
+
 export type TeamMemberWithTeamAndUserSchema = Omit<TeamMemberWithTeamSchema, 'userId'> & {
   userId: UserModelSchema;
 };
 
-export type TeamItemType = {
+export type TeamTmbItemType = {
   userId: string;
   teamId: string;
   teamName: string;
@@ -57,7 +66,9 @@ export type TeamItemType = {
   defaultTeam: boolean;
   role: `${TeamMemberRoleEnum}`;
   status: `${TeamMemberStatusEnum}`;
-  canWrite: boolean;
+  lafAccount?: LafAccountType;
+  notificationAccount?: string;
+  permission: TeamPermission;
 };
 
 export type TeamMemberItemType = {
@@ -68,9 +79,32 @@ export type TeamMemberItemType = {
   avatar: string;
   role: `${TeamMemberRoleEnum}`;
   status: `${TeamMemberStatusEnum}`;
+  permission: TeamPermission;
 };
 
 export type TeamTagItemType = {
   label: string;
   key: string;
+};
+
+export type LafAccountType = {
+  token: string;
+  appid: string;
+  pat: string;
+};
+
+export type TeamInvoiceHeaderType = {
+  teamName: string;
+  unifiedCreditCode: string;
+  companyAddress?: string;
+  companyPhone?: string;
+  bankName?: string;
+  bankAccount?: string;
+  needSpecialInvoice: boolean;
+  emailAddress: string;
+};
+
+export type TeamInvoiceHeaderInfoSchemaType = TeamInvoiceHeaderType & {
+  _id: string;
+  teamId: string;
 };

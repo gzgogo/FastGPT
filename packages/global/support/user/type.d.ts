@@ -1,12 +1,10 @@
+import { TeamPermission } from '../permission/user/controller';
 import { UserStatusEnum } from './constant';
-import { TeamItemType } from './team/type';
+import { TeamTmbItemType } from './team/type';
 
 export type UserModelSchema = {
   _id: string;
   username: string;
-  email?: string;
-  phonePrefix?: number;
-  phone?: string;
   password: string;
   avatar: string;
   promotionRate: number;
@@ -20,6 +18,9 @@ export type UserModelSchema = {
     key: string;
     baseUrl: string;
   };
+  fastgpt_sem?: {
+    keyword: string;
+  };
 };
 
 export type UserType = {
@@ -29,6 +30,8 @@ export type UserType = {
   timezone: string;
   promotionRate: UserModelSchema['promotionRate'];
   openaiAccount: UserModelSchema['openaiAccount'];
-  team: TeamItemType;
+  team: TeamTmbItemType;
   standardInfo?: standardInfoType;
+  notificationAccount?: string;
+  permission: TeamPermission;
 };

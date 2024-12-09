@@ -1,6 +1,5 @@
-import { LLMModelItemType } from '@fastgpt/global/core/ai/model.d';
-import { getAIApi } from '../../../../ai/config';
-import { filterGPTMessageByMaxTokens } from '../../../../chat/utils';
+import { createChatCompletion } from '../../../../ai/config';
+import { filterGPTMessageByMaxTokens, loadRequestMessages } from '../../../../chat/utils';
 import {
   ChatCompletion,
   StreamChatType,
@@ -8,21 +7,28 @@ import {
   ChatCompletionAssistantMessageParam
 } from '@fastgpt/global/core/ai/type';
 import { NextApiResponse } from 'next';
-import {
-  responseWrite,
-  responseWriteController,
-  responseWriteNodeStatus
-} from '../../../../../common/response';
-import { SseResponseEventEnum } from '@fastgpt/global/core/module/runtime/constants';
-import { textAdaptGptResponse } from '@fastgpt/global/core/module/runtime/utils';
+import { responseWriteController } from '../../../../../common/response';
+import { SseResponseEventEnum } from '@fastgpt/global/core/workflow/runtime/constants';
+import { textAdaptGptResponse } from '@fastgpt/global/core/workflow/runtime/utils';
 import { ChatCompletionRequestMessageRoleEnum } from '@fastgpt/global/core/ai/constants';
 import { dispatchWorkFlow } from '../../index';
-import { DispatchToolModuleProps, RunToolResponse, ToolModuleItemType } from './type.d';
+import { DispatchToolModuleProps, RunToolResponse, ToolNodeItemType } from './type.d';
 import json5 from 'json5';
-import { countGptMessagesTokens } from '@fastgpt/global/common/string/tiktoken';
-import { getNanoid, replaceVariable } from '@fastgpt/global/common/string/tools';
+import { countGptMessagesTokens } from '../../../../../common/string/tiktoken/index';
+import {
+  getNanoid,
+  replaceVariable,
+  sliceJsonStr,
+  sliceStrStartEnd
+} from '@fastgpt/global/common/string/tools';
 import { AIChatItemType } from '@fastgpt/global/core/chat/type';
 import { GPTMessages2Chats } from '@fastgpt/global/core/chat/adapt';
+import { formatToolResponse, initToolCallEdges, initToolNodes } from './utils';
+import { computedMaxToken, llmCompletionsBodyFormat } from '../../../../ai/utils';
+import { WorkflowResponseType } from '../../type';
+import { toolValueTypeList } from '@fastgpt/global/core/workflow/constants';
+import { WorkflowInteractiveResponseType } from '@fastgpt/global/core/workflow/template/system/interactive/type';
+import { ChatItemValueTypeEnum } from '@fastgpt/global/core/chat/constants';
 
 type FunctionCallCompletion = {
   id: string;
@@ -32,94 +38,213 @@ type FunctionCallCompletion = {
   toolAvatar?: string;
 };
 
+const ERROR_TEXT = 'Tool run error';
+const INTERACTIVE_STOP_SIGNAL = 'INTERACTIVE_STOP_SIGNAL';
+
 export const runToolWithPromptCall = async (
-  props: DispatchToolModuleProps & {
-    messages: ChatCompletionMessageParam[];
-    toolModules: ToolModuleItemType[];
-    toolModel: LLMModelItemType;
-  },
+  props: DispatchToolModuleProps,
   response?: RunToolResponse
 ): Promise<RunToolResponse> => {
+  const { messages, toolNodes, toolModel, interactiveEntryToolParams, ...workflowProps } = props;
   const {
-    toolModel,
-    toolModules,
-    messages,
     res,
-    runtimeModules,
-    detail = false,
-    module,
-    stream
-  } = props;
+    requestOrigin,
+    runtimeNodes,
+    runtimeEdges,
+    user,
+    stream,
+    workflowStreamResponse,
+    params: { temperature = 0, maxToken = 4000, aiChatVision }
+  } = workflowProps;
+
+  if (interactiveEntryToolParams) {
+    initToolNodes(runtimeNodes, interactiveEntryToolParams.entryNodeIds);
+    initToolCallEdges(runtimeEdges, interactiveEntryToolParams.entryNodeIds);
+
+    // Run entry tool
+    const toolRunResponse = await dispatchWorkFlow({
+      ...workflowProps,
+      isToolCall: true
+    });
+    const stringToolResponse = formatToolResponse(toolRunResponse.toolResponses);
+
+    workflowStreamResponse?.({
+      event: SseResponseEventEnum.toolResponse,
+      data: {
+        tool: {
+          id: interactiveEntryToolParams.toolCallId,
+          toolName: '',
+          toolAvatar: '',
+          params: '',
+          response: sliceStrStartEnd(stringToolResponse, 5000, 5000)
+        }
+      }
+    });
+
+    // Check interactive response(Only 1 interaction is reserved)
+    const workflowInteractiveResponseItem = toolRunResponse?.workflowInteractiveResponse
+      ? toolRunResponse
+      : undefined;
+
+    // Rewrite toolCall messages
+    const concatMessages = [...messages.slice(0, -1), ...interactiveEntryToolParams.memoryMessages];
+    const lastMessage = concatMessages[concatMessages.length - 1];
+    lastMessage.content = workflowInteractiveResponseItem
+      ? lastMessage.content
+      : replaceVariable(lastMessage.content, {
+          [INTERACTIVE_STOP_SIGNAL]: stringToolResponse
+        });
+
+    // Check stop signal
+    const hasStopSignal = toolRunResponse.flowResponses.some((item) => !!item.toolStop);
+    if (hasStopSignal || workflowInteractiveResponseItem) {
+      // Get interactive tool data
+      const workflowInteractiveResponse =
+        workflowInteractiveResponseItem?.workflowInteractiveResponse;
+      const toolWorkflowInteractiveResponse: WorkflowInteractiveResponseType | undefined =
+        workflowInteractiveResponse
+          ? {
+              ...workflowInteractiveResponse,
+              toolParams: {
+                entryNodeIds: workflowInteractiveResponse.entryNodeIds,
+                toolCallId: '',
+                memoryMessages: [lastMessage]
+              }
+            }
+          : undefined;
+
+      return {
+        dispatchFlowResponse: [toolRunResponse],
+        toolNodeTokens: 0,
+        completeMessages: concatMessages,
+        assistantResponses: toolRunResponse.assistantResponses,
+        runTimes: toolRunResponse.runTimes,
+        toolWorkflowInteractiveResponse
+      };
+    }
+
+    return runToolWithPromptCall(
+      {
+        ...props,
+        interactiveEntryToolParams: undefined,
+        messages: concatMessages
+      },
+      {
+        dispatchFlowResponse: [toolRunResponse],
+        toolNodeTokens: 0,
+        assistantResponses: toolRunResponse.assistantResponses,
+        runTimes: toolRunResponse.runTimes
+      }
+    );
+  }
+
   const assistantResponses = response?.assistantResponses || [];
 
   const toolsPrompt = JSON.stringify(
-    toolModules.map((module) => {
+    toolNodes.map((item) => {
       const properties: Record<
         string,
         {
           type: string;
           description: string;
           required?: boolean;
+          enum?: string[];
         }
       > = {};
-      module.toolParams.forEach((item) => {
+      item.toolParams.forEach((item) => {
+        const jsonSchema = (
+          toolValueTypeList.find((type) => type.value === item.valueType) || toolValueTypeList[0]
+        ).jsonSchema;
+
         properties[item.key] = {
-          type: 'string',
-          description: item.toolDescription || ''
+          ...jsonSchema,
+          description: item.toolDescription || '',
+          enum: item.enum?.split('\n').filter(Boolean) || []
         };
       });
 
       return {
-        toolId: module.moduleId,
-        description: module.intro,
+        toolId: item.nodeId,
+        description: item.intro,
         parameters: {
           type: 'object',
           properties,
-          required: module.toolParams.filter((item) => item.required).map((item) => item.key)
+          required: item.toolParams.filter((item) => item.required).map((item) => item.key)
         }
       };
     })
   );
 
   const lastMessage = messages[messages.length - 1];
-  if (typeof lastMessage.content !== 'string') {
-    return Promise.reject('暂时只支持纯文本');
+  if (typeof lastMessage.content === 'string') {
+    lastMessage.content = replaceVariable(lastMessage.content, {
+      toolsPrompt
+    });
+  } else if (Array.isArray(lastMessage.content)) {
+    // array, replace last element
+    const lastText = lastMessage.content[lastMessage.content.length - 1];
+    if (lastText.type === 'text') {
+      lastText.text = replaceVariable(lastText.text, {
+        toolsPrompt
+      });
+    } else {
+      return Promise.reject('Prompt call invalid input');
+    }
+  } else {
+    return Promise.reject('Prompt call invalid input');
   }
-  lastMessage.content = replaceVariable(lastMessage.content, {
-    toolsPrompt
-  });
 
-  const filterMessages = filterGPTMessageByMaxTokens({
+  const filterMessages = await filterGPTMessageByMaxTokens({
     messages,
     maxTokens: toolModel.maxContext - 500 // filter token. not response maxToken
   });
-  // console.log(JSON.stringify(filterMessages, null, 2));
-  /* Run llm */
-  const ai = getAIApi({
-    timeout: 480000
-  });
-  const aiResponse = await ai.chat.completions.create(
+
+  const [requestMessages, max_tokens] = await Promise.all([
+    loadRequestMessages({
+      messages: filterMessages,
+      useVision: toolModel.vision && aiChatVision,
+      origin: requestOrigin
+    }),
+    computedMaxToken({
+      model: toolModel,
+      maxToken,
+      filterMessages
+    })
+  ]);
+  const requestBody = llmCompletionsBodyFormat(
     {
-      ...toolModel?.defaultConfig,
       model: toolModel.model,
-      temperature: 0,
+      temperature,
+      max_tokens,
       stream,
-      messages: filterMessages
+      messages: requestMessages
     },
-    {
+    toolModel
+  );
+
+  // console.log(JSON.stringify(requestMessages, null, 2));
+  /* Run llm */
+  const {
+    response: aiResponse,
+    isStreamResponse,
+    getEmptyResponseTip
+  } = await createChatCompletion({
+    body: requestBody,
+    userKey: user.openaiAccount,
+    options: {
       headers: {
         Accept: 'application/json, text/plain, */*'
       }
     }
-  );
+  });
 
   const answer = await (async () => {
-    if (stream) {
+    if (res && isStreamResponse) {
       const { answer } = await streamResponse({
         res,
-        detail,
-        toolModules,
-        stream: aiResponse
+        toolNodes,
+        stream: aiResponse,
+        workflowStreamResponse
       });
 
       return answer;
@@ -129,18 +254,39 @@ export const runToolWithPromptCall = async (
       return result.choices?.[0]?.message?.content || '';
     }
   })();
+  const { answer: replaceAnswer, toolJson } = parseAnswer(answer);
+  if (!answer && !toolJson) {
+    return Promise.reject(getEmptyResponseTip());
+  }
 
-  const parseAnswerResult = parseAnswer(answer);
-  // console.log(parseAnswer, '==11==');
   // No tools
-  if (typeof parseAnswerResult === 'string') {
+  if (!toolJson) {
+    if (replaceAnswer === ERROR_TEXT) {
+      workflowStreamResponse?.({
+        event: SseResponseEventEnum.answer,
+        data: textAdaptGptResponse({
+          text: replaceAnswer
+        })
+      });
+    }
+
+    // 不支持 stream 模式的模型的流失响应
+    if (stream && !isStreamResponse) {
+      workflowStreamResponse?.({
+        event: SseResponseEventEnum.fastAnswer,
+        data: textAdaptGptResponse({
+          text: replaceAnswer
+        })
+      });
+    }
+
     // No tool is invoked, indicating that the process is over
     const gptAssistantResponse: ChatCompletionAssistantMessageParam = {
       role: ChatCompletionRequestMessageRoleEnum.Assistant,
-      content: parseAnswerResult
+      content: replaceAnswer
     };
     const completeMessages = filterMessages.concat(gptAssistantResponse);
-    const tokens = countGptMessagesTokens(completeMessages, undefined);
+    const tokens = await countGptMessagesTokens(completeMessages, undefined);
     // console.log(tokens, 'response token');
 
     // concat tool assistant
@@ -148,143 +294,177 @@ export const runToolWithPromptCall = async (
 
     return {
       dispatchFlowResponse: response?.dispatchFlowResponse || [],
-      totalTokens: response?.totalTokens ? response.totalTokens + tokens : tokens,
+      toolNodeTokens: response?.toolNodeTokens ? response.toolNodeTokens + tokens : tokens,
       completeMessages,
-      assistantResponses: [...assistantResponses, ...toolNodeAssistant.value]
+      assistantResponses: [...assistantResponses, ...toolNodeAssistant.value],
+      runTimes: (response?.runTimes || 0) + 1
     };
   }
 
   // Run the selected tool.
   const toolsRunResponse = await (async () => {
-    if (!parseAnswerResult) return Promise.reject('tool run error');
+    const toolNode = toolNodes.find((item) => item.nodeId === toolJson.name);
+    if (!toolNode) return Promise.reject('tool not found');
 
-    const toolModule = toolModules.find((module) => module.moduleId === parseAnswerResult.name);
-    if (!toolModule) return Promise.reject('tool not found');
-
-    parseAnswerResult.toolName = toolModule.name;
-    parseAnswerResult.toolAvatar = toolModule.avatar;
+    toolJson.toolName = toolNode.name;
+    toolJson.toolAvatar = toolNode.avatar;
 
     // run tool flow
     const startParams = (() => {
       try {
-        return json5.parse(parseAnswerResult.arguments);
+        return json5.parse(toolJson.arguments);
       } catch (error) {
         return {};
       }
     })();
 
     // SSE response to client
-    if (stream && detail) {
-      responseWrite({
-        res,
-        event: SseResponseEventEnum.toolCall,
-        data: JSON.stringify({
-          tool: {
-            id: parseAnswerResult.id,
-            toolName: toolModule.name,
-            toolAvatar: toolModule.avatar,
-            functionName: parseAnswerResult.name,
-            params: parseAnswerResult.arguments,
-            response: ''
-          }
-        })
-      });
-    }
-
-    const moduleRunResponse = await dispatchWorkFlow({
-      ...props,
-      runtimeModules: runtimeModules.map((module) => ({
-        ...module,
-        isEntry: module.moduleId === toolModule.moduleId
-      })),
-      startParams
+    workflowStreamResponse?.({
+      event: SseResponseEventEnum.toolCall,
+      data: {
+        tool: {
+          id: toolJson.id,
+          toolName: toolNode.name,
+          toolAvatar: toolNode.avatar,
+          functionName: toolJson.name,
+          params: toolJson.arguments,
+          response: ''
+        }
+      }
     });
 
-    const stringToolResponse = (() => {
-      if (typeof moduleRunResponse.toolResponses === 'object') {
-        return JSON.stringify(moduleRunResponse.toolResponses, null, 2);
+    initToolNodes(runtimeNodes, [toolNode.nodeId], startParams);
+    const toolResponse = await dispatchWorkFlow({
+      ...workflowProps,
+      isToolCall: true
+    });
+
+    const stringToolResponse = formatToolResponse(toolResponse.toolResponses);
+
+    workflowStreamResponse?.({
+      event: SseResponseEventEnum.toolResponse,
+      data: {
+        tool: {
+          id: toolJson.id,
+          toolName: '',
+          toolAvatar: '',
+          params: '',
+          response: sliceStrStartEnd(stringToolResponse, 500, 500)
+        }
       }
-
-      return moduleRunResponse.toolResponses ? String(moduleRunResponse.toolResponses) : 'none';
-    })();
-
-    if (stream && detail) {
-      responseWrite({
-        res,
-        event: SseResponseEventEnum.toolResponse,
-        data: JSON.stringify({
-          tool: {
-            id: parseAnswerResult.id,
-            toolName: '',
-            toolAvatar: '',
-            params: '',
-            response: stringToolResponse
-          }
-        })
-      });
-    }
+    });
 
     return {
-      moduleRunResponse,
+      toolResponse,
       toolResponsePrompt: stringToolResponse
     };
   })();
 
-  if (stream && detail) {
-    responseWriteNodeStatus({
-      res,
-      name: module.name
-    });
-  }
-
   // 合并工具调用的结果，使用 functionCall 格式存储。
   const assistantToolMsgParams: ChatCompletionAssistantMessageParam = {
     role: ChatCompletionRequestMessageRoleEnum.Assistant,
-    function_call: parseAnswerResult
+    function_call: toolJson
   };
+
+  /* 
+    ...
+    user
+    assistant: tool data
+  */
   const concatToolMessages = [
-    ...filterMessages,
+    ...requestMessages,
     assistantToolMsgParams
   ] as ChatCompletionMessageParam[];
-  const tokens = countGptMessagesTokens(concatToolMessages, undefined);
-  const completeMessages: ChatCompletionMessageParam[] = [
-    ...concatToolMessages,
-    {
-      role: ChatCompletionRequestMessageRoleEnum.Function,
-      name: parseAnswerResult.name,
-      content: toolsRunResponse.toolResponsePrompt
-    }
+  // Only toolCall tokens are counted here, Tool response tokens count towards the next reply
+  const tokens = await countGptMessagesTokens(concatToolMessages, undefined);
+
+  /* 
+    ...
+    user
+    assistant: tool data
+    function: tool response
+  */
+  const functionResponseMessage: ChatCompletionMessageParam = {
+    role: ChatCompletionRequestMessageRoleEnum.Function,
+    name: toolJson.name,
+    content: toolsRunResponse.toolResponsePrompt
+  };
+
+  // tool node assistant
+  const toolNodeAssistant = GPTMessages2Chats([
+    assistantToolMsgParams,
+    functionResponseMessage
+  ])[0] as AIChatItemType;
+  const toolChildAssistants = toolsRunResponse.toolResponse.assistantResponses.filter(
+    (item) => item.type !== ChatItemValueTypeEnum.interactive
+  );
+  const toolNodeAssistants = [
+    ...assistantResponses,
+    ...toolNodeAssistant.value,
+    ...toolChildAssistants
   ];
 
-  // tool assistant
-  const toolAssistants = toolsRunResponse.moduleRunResponse.assistantResponses || [];
-  // tool node assistant
-  const adaptChatMessages = GPTMessages2Chats(completeMessages);
-  const toolNodeAssistant = adaptChatMessages.pop() as AIChatItemType;
-
-  const toolNodeAssistants = [...assistantResponses, ...toolAssistants, ...toolNodeAssistant.value];
-
   const dispatchFlowResponse = response
-    ? response.dispatchFlowResponse.concat(toolsRunResponse.moduleRunResponse)
-    : [toolsRunResponse.moduleRunResponse];
+    ? [...response.dispatchFlowResponse, toolsRunResponse.toolResponse]
+    : [toolsRunResponse.toolResponse];
+
+  // Check interactive response(Only 1 interaction is reserved)
+  const workflowInteractiveResponseItem = toolsRunResponse.toolResponse?.workflowInteractiveResponse
+    ? toolsRunResponse.toolResponse
+    : undefined;
 
   // get the next user prompt
-  lastMessage.content += `${answer}
+  if (typeof lastMessage.content === 'string') {
+    lastMessage.content += `${replaceAnswer}
 TOOL_RESPONSE: """
-${toolsRunResponse.toolResponsePrompt}
+${workflowInteractiveResponseItem ? `{{${INTERACTIVE_STOP_SIGNAL}}}` : toolsRunResponse.toolResponsePrompt}
 """
 ANSWER: `;
+  } else if (Array.isArray(lastMessage.content)) {
+    // array, replace last element
+    const lastText = lastMessage.content[lastMessage.content.length - 1];
+    if (lastText.type === 'text') {
+      lastText.text += `${replaceAnswer}
+TOOL_RESPONSE: """
+${workflowInteractiveResponseItem ? `{{${INTERACTIVE_STOP_SIGNAL}}}` : toolsRunResponse.toolResponsePrompt}
+"""
+ANSWER: `;
+    } else {
+      return Promise.reject('Prompt call invalid input');
+    }
+  } else {
+    return Promise.reject('Prompt call invalid input');
+  }
 
-  /* check stop signal */
-  const hasStopSignal = toolsRunResponse.moduleRunResponse.flowResponses.some(
-    (item) => !!item.toolStop
-  );
-  if (hasStopSignal) {
+  const runTimes = (response?.runTimes || 0) + toolsRunResponse.toolResponse.runTimes;
+  const toolNodeTokens = response?.toolNodeTokens ? response.toolNodeTokens + tokens : tokens;
+
+  // Check stop signal
+  const hasStopSignal = toolsRunResponse.toolResponse.flowResponses.some((item) => !!item.toolStop);
+
+  if (hasStopSignal || workflowInteractiveResponseItem) {
+    // Get interactive tool data
+    const workflowInteractiveResponse =
+      workflowInteractiveResponseItem?.workflowInteractiveResponse;
+    const toolWorkflowInteractiveResponse: WorkflowInteractiveResponseType | undefined =
+      workflowInteractiveResponse
+        ? {
+            ...workflowInteractiveResponse,
+            toolParams: {
+              entryNodeIds: workflowInteractiveResponse.entryNodeIds,
+              toolCallId: '',
+              memoryMessages: [lastMessage]
+            }
+          }
+        : undefined;
+
     return {
       dispatchFlowResponse,
-      totalTokens: response?.totalTokens ? response.totalTokens + tokens : tokens,
+      toolNodeTokens,
       completeMessages: filterMessages,
-      assistantResponses: toolNodeAssistants
+      assistantResponses: toolNodeAssistants,
+      runTimes,
+      toolWorkflowInteractiveResponse
     };
   }
 
@@ -295,21 +475,22 @@ ANSWER: `;
     },
     {
       dispatchFlowResponse,
-      totalTokens: response?.totalTokens ? response.totalTokens + tokens : tokens,
-      assistantResponses: toolNodeAssistants
+      toolNodeTokens,
+      assistantResponses: toolNodeAssistants,
+      runTimes
     }
   );
 };
 
 async function streamResponse({
   res,
-  detail,
-  stream
+  stream,
+  workflowStreamResponse
 }: {
   res: NextApiResponse;
-  detail: boolean;
-  toolModules: ToolModuleItemType[];
+  toolNodes: ToolNodeItemType[];
   stream: StreamChatType;
+  workflowStreamResponse?: WorkflowResponseType;
 }) {
   const write = responseWriteController({
     res,
@@ -326,14 +507,16 @@ async function streamResponse({
     }
 
     const responseChoice = part.choices?.[0]?.delta;
-    if (responseChoice.content) {
+    // console.log(responseChoice, '---===');
+
+    if (responseChoice?.content) {
       const content = responseChoice?.content || '';
       textAnswer += content;
 
       if (startResponseWrite) {
-        responseWrite({
+        workflowStreamResponse?.({
           write,
-          event: detail ? SseResponseEventEnum.answer : undefined,
+          event: SseResponseEventEnum.answer,
           data: textAdaptGptResponse({
             text: content
           })
@@ -345,9 +528,9 @@ async function streamResponse({
           // find first : index
           const firstIndex = textAnswer.indexOf(':');
           textAnswer = textAnswer.substring(firstIndex + 1).trim();
-          responseWrite({
+          workflowStreamResponse?.({
             write,
-            event: detail ? SseResponseEventEnum.answer : undefined,
+            event: SseResponseEventEnum.answer,
             data: textAdaptGptResponse({
               text: textAnswer
             })
@@ -357,31 +540,41 @@ async function streamResponse({
     }
   }
 
-  if (!textAnswer) {
-    return Promise.reject('LLM api response empty');
-  }
-  // console.log(textAnswer, '---===');
   return { answer: textAnswer.trim() };
 }
 
-const parseAnswer = (str: string): FunctionCallCompletion | string => {
-  // 首先，使用正则表达式提取TOOL_ID和TOOL_ARGUMENTS
-  const prefix = '1:';
+const parseAnswer = (
+  str: string
+): {
+  answer: string;
+  toolJson?: FunctionCallCompletion;
+} => {
   str = str.trim();
-  if (str.startsWith(prefix)) {
-    const toolString = str.substring(prefix.length).trim();
+  // 首先，使用正则表达式提取TOOL_ID和TOOL_ARGUMENTS
+  const prefixReg = /^1(:|：)/;
+  const answerPrefixReg = /^0(:|：)/;
+
+  if (prefixReg.test(str)) {
+    const toolString = sliceJsonStr(str);
 
     try {
       const toolCall = json5.parse(toolString);
       return {
-        id: getNanoid(),
-        name: toolCall.toolId,
-        arguments: JSON.stringify(toolCall.arguments || toolCall.parameters)
+        answer: `1: ${toolString}`,
+        toolJson: {
+          id: getNanoid(),
+          name: toolCall.toolId,
+          arguments: JSON.stringify(toolCall.arguments || toolCall.parameters)
+        }
       };
     } catch (error) {
-      return str;
+      return {
+        answer: ERROR_TEXT
+      };
     }
   } else {
-    return str;
+    return {
+      answer: str.replace(answerPrefixReg, '')
+    };
   }
 };

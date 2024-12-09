@@ -1,23 +1,26 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { jsonRes } from '@fastgpt/service/common/response';
 import { connectToDatabase } from '@/service/mongo';
-import { authChatCert } from '@/service/support/permission/auth/chat';
 import { uploadMongoImg } from '@fastgpt/service/common/file/image/controller';
 import { UploadImgProps } from '@fastgpt/global/common/file/api';
+import { authCert } from '@fastgpt/service/support/permission/auth/common';
 
+/* 
+  Upload avatar image
+*/
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     await connectToDatabase();
     const body = req.body as UploadImgProps;
 
-    const { teamId } = await authChatCert({ req, authToken: true });
+    const { teamId } = await authCert({ req, authToken: true });
 
-    const data = await uploadMongoImg({
+    const imgId = await uploadMongoImg({
       teamId,
       ...body
     });
 
-    jsonRes(res, { data });
+    jsonRes(res, { data: imgId });
   } catch (error) {
     jsonRes(res, {
       code: 500,

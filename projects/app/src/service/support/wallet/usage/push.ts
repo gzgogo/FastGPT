@@ -4,20 +4,23 @@ import { addLog } from '@fastgpt/service/common/system/log';
 import { createUsage, concatUsage } from './controller';
 import { formatModelChars2Points } from '@fastgpt/service/support/wallet/usage/utils';
 import { ChatNodeUsageType } from '@fastgpt/global/support/wallet/bill/type';
+import { i18nT } from '@fastgpt/web/i18n/utils';
 
 export const pushChatUsage = ({
   appName,
   appId,
+  pluginId,
   teamId,
   tmbId,
   source,
   flowUsages
 }: {
   appName: string;
-  appId: string;
+  appId?: string;
+  pluginId?: string;
   teamId: string;
   tmbId: string;
-  source: `${UsageSourceEnum}`;
+  source: UsageSourceEnum;
   flowUsages: ChatNodeUsageType[];
 }) => {
   const totalPoints = flowUsages.reduce((sum, item) => sum + (item.totalPoints || 0), 0);
@@ -27,6 +30,7 @@ export const pushChatUsage = ({
     tmbId,
     appName,
     appId,
+    pluginId,
     totalPoints,
     source,
     list: flowUsages.map((item) => ({
@@ -39,7 +43,6 @@ export const pushChatUsage = ({
   addLog.info(`finish completions`, {
     source,
     teamId,
-    tmbId,
     totalPoints
   });
   return { totalPoints };
@@ -92,7 +95,7 @@ export const pushGenerateVectorUsage = ({
   tmbId: string;
   tokens: number;
   model: string;
-  source?: `${UsageSourceEnum}`;
+  source?: UsageSourceEnum;
 
   extensionModel?: string;
   extensionTokens?: number;
@@ -196,7 +199,7 @@ export const pushQuestionGuideUsage = ({
 };
 
 export function pushAudioSpeechUsage({
-  appName = 'support.wallet.usage.Audio Speech',
+  appName = i18nT('common:support.wallet.usage.Audio Speech'),
   model,
   charsLength,
   teamId,
@@ -208,7 +211,7 @@ export function pushAudioSpeechUsage({
   charsLength: number;
   teamId: string;
   tmbId: string;
-  source: `${UsageSourceEnum}`;
+  source: UsageSourceEnum;
 }) {
   const { totalPoints, modelName } = formatModelChars2Points({
     model,
